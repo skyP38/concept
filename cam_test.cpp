@@ -29,7 +29,7 @@ void run_tests() {
     
     try {
         Type type = infer_type(apply_id, context);
-        std::cout << "Тип: " << type_to_string(type) << "\n";
+        std::cout << "Тип: " << type_to_string_full(type) << "\n";
     } catch (const std::exception& e) {
         std::cout << "Ошибка типизации: " << e.what() << "\n";
     }
@@ -50,7 +50,7 @@ void run_tests() {
     
     try {
         Type type = infer_type(apply_const, context);
-        std::cout << "Тип: " << type_to_string(type) << "\n";
+        std::cout << "Тип: " << type_to_string_full(type) << "\n";
     } catch (const std::exception& e) {
         std::cout << "Ошибка типизации: " << e.what() << "\n";
     }
@@ -70,7 +70,7 @@ void run_tests() {
     
     try {
         Type type = infer_type(bad_apply, context);
-        std::cout << "Тип: " << type_to_string(type) << "\n";
+        std::cout << "Тип: " << type_to_string_full(type) << "\n";
     } catch (const std::exception& e) {
         std::cout << "Ошибка типизации (ожидаемо): " << e.what() << "\n";
     }
@@ -89,7 +89,7 @@ void run_tests() {
     
     try {
         Type type = infer_type(test_higher_order, context);
-        std::cout << "Тип: " << type_to_string(type) << "\n";
+        std::cout << "Тип: " << type_to_string_full(type) << "\n";
     } catch (const std::exception& e) {
         std::cout << "Ошибка типизации: " << e.what() << "\n";
     }
@@ -99,7 +99,7 @@ void run_tests() {
     print_expr(normalized);
     std::cout << "\n\n";
     
-    // Тест 5: Самоприменение (должно вызвать ошибку типизации)
+    // Тест 5: Самоприменение (ошибка типизации)
     Expr self_apply = make_lambda("x", make_typevar(), 
                                  make_apply(make_variable("x", make_typevar()), 
                                             make_variable("x", make_typevar())));
@@ -111,7 +111,7 @@ void run_tests() {
     
     try {
         Type type = infer_type(self_apply, context);
-        std::cout << "Тип: " << type_to_string(type) << "\n";
+        std::cout << "Тип: " << type_to_string_full(type) << "\n";
     } catch (const std::exception& e) {
         std::cout << "Ошибка типизации (ожидаемо): " << e.what() << "\n";
     }

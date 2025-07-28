@@ -50,7 +50,6 @@ Type make_arrow(Type from, Type to);
 Type make_typeconst(const std::string& name);
 
 // Вывод типа в строку
-std::string type_to_string(Type type);
 std::string type_to_string_full(Type type); 
 
 // Выражения в КАМ
@@ -109,7 +108,7 @@ Type infer_type(Expr expr, TypeContext& context);
 // Подстановка переменной в выражении
 Expr substitute(Expr expr, const std::string& var, Expr value);
 
-// Редукция выражения (один шаг)
+// Редукция выражения 
 std::pair<Expr, bool> reduce(Expr expr);
 
 // Полная нормальная форма
@@ -121,10 +120,9 @@ void print_expr(const Expr& expr);
 struct UnifyVisitor {
     Type t2;
     std::unordered_map<int, Type>& substitutions;
-    int depth;  // Добавляем счетчик глубины
     
     UnifyVisitor(Type t2, std::unordered_map<int, Type>& subs, int d = 0)
-        : t2(t2), substitutions(subs), depth(d) {}
+        : t2(t2), substitutions(subs) {}
     
     void operator()(const std::shared_ptr<TypeVar>& tv1);
     void operator()(const std::shared_ptr<TypeArrow>& ta1);
