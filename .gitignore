@@ -2,3 +2,6 @@ ring_concept
 a.out
 .vscode
 cam_program
+cam.cpp
+cam.hpp
+cam_test.cpp

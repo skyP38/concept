@@ -8,6 +8,6 @@ g++ -std=c++20 ring.cpp -o ring_concept
 g++ -std=c++20 list.cpp
 ./a.out
 
-КАМ - cam.cpp cam.hpp cam_test.cpp
-g++ cam.cpp cam_test.cpp -o cam_program
+КАМ - cam_new.cpp 
+g++ cam_new.cpp -o cam_program
 ./cam_program
