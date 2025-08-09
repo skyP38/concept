@@ -2,16 +2,12 @@
 #include <vector>
 #include <string>
 #include <memory>
-#include <variant>
-#include <stdexcept>
-#include <sstream>
-#include <cctype>
 #include <unordered_map>
 #include <stack>
 
 using namespace std;
 
-// ==================== AST с де Брауновскими индексами ====================
+// ==================== AST ====================
 struct Term;
 using TermPtr = shared_ptr<Term>;
 
@@ -19,6 +15,8 @@ struct Term {
     virtual ~Term() = default;
     virtual string toString() const = 0;
     virtual TermPtr toDeBruijn(int level = 0, const unordered_map<string, int>& env = {}) const = 0;
+    virtual TermPtr reduce() const = 0;
+    virtual bool isValue() const { return false; }
 };
 
 struct Variable : Term {
@@ -28,7 +26,7 @@ struct Variable : Term {
     Variable(string n) : name(n) {}
     
     string toString() const override {
-        if (deBruijnIdx >= 0) return "v" + to_string(deBruijnIdx);
+        if (deBruijnIdx >= 0) return "#" + to_string(deBruijnIdx);
         return name;
     }
     
@@ -41,19 +39,23 @@ struct Variable : Term {
         }
         return newVar;
     }
+    
+    TermPtr reduce() const override { return make_shared<Variable>(*this); }
+    bool isValue() const override { return true; }
 };
 
 struct Number : Term {
     int value;
     Number(int v) : value(v) {}
     
-    string toString() const override { 
-        return to_string(value); 
-    }
+    string toString() const override { return to_string(value); }
     
     TermPtr toDeBruijn(int level, const unordered_map<string, int>& env) const override {
         return make_shared<Number>(*this);
     }
+    
+    TermPtr reduce() const override { return make_shared<Number>(*this); }
+    bool isValue() const override { return true; }
 };
 
 struct Lambda : Term {
@@ -63,15 +65,20 @@ struct Lambda : Term {
     Lambda(string p, TermPtr b) : param(p), body(b) {}
     
     string toString() const override { 
-        return "(lambda " + param + ". " + body->toString() + ")"; 
+        return "(λ" + param + "." + body->toString() + ")"; 
     }
     
     TermPtr toDeBruijn(int level, const unordered_map<string, int>& env) const override {
         unordered_map<string, int> new_env = env;
         new_env[param] = level;
-        auto newBody = body->toDeBruijn(level + 1, new_env);
-        return make_shared<Lambda>(param, newBody);
+        return make_shared<Lambda>(param, body->toDeBruijn(level + 1, new_env));
     }
+    
+    TermPtr reduce() const override {
+        return make_shared<Lambda>(param, body->reduce());
+    }
+    
+    bool isValue() const override { return true; }
 };
 
 struct Application : Term {
@@ -88,6 +95,41 @@ struct Application : Term {
         return make_shared<Application>(
             func->toDeBruijn(level, env), 
             arg->toDeBruijn(level, env));
+    }
+    
+    TermPtr reduce() const override {
+        if (auto lam = dynamic_pointer_cast<Lambda>(func)) {
+            // β-reduction with substitution
+            return substitute(lam->body, lam->param, arg)->reduce();
+        }
+        if (!func->isValue()) {
+            return make_shared<Application>(func->reduce(), arg);
+        }
+        if (!arg->isValue()) {
+            return make_shared<Application>(func, arg->reduce());
+        }
+        return make_shared<Application>(func, arg);
+    }
+    
+    static TermPtr substitute(TermPtr term, const string& var, TermPtr replacement) {
+        if (auto v = dynamic_pointer_cast<Variable>(term)) {
+            if (v->name == var) return replacement;
+            return term;
+        }
+        if (auto num = dynamic_pointer_cast<Number>(term)) {
+            return term;
+        }
+        if (auto lam = dynamic_pointer_cast<Lambda>(term)) {
+            if (lam->param == var) return term;
+            auto newBody = substitute(lam->body, var, replacement);
+            return make_shared<Lambda>(lam->param, newBody);
+        }
+        if (auto app = dynamic_pointer_cast<Application>(term)) {
+            auto newFunc = substitute(app->func, var, replacement);
+            auto newArg = substitute(app->arg, var, replacement);
+            return make_shared<Application>(newFunc, newArg);
+        }
+        return term;
     }
 };
 
@@ -107,9 +149,172 @@ struct BinaryOp : Term {
             left->toDeBruijn(level, env), 
             right->toDeBruijn(level, env));
     }
+    
+    TermPtr reduce() const override {
+        if (!left->isValue()) {
+            return make_shared<BinaryOp>(op, left->reduce(), right);
+        }
+        if (!right->isValue()) {
+            return make_shared<BinaryOp>(op, left, right->reduce());
+        }
+        if (auto lnum = dynamic_pointer_cast<Number>(left)) {
+            if (auto rnum = dynamic_pointer_cast<Number>(right)) {
+                if (op == '+') return make_shared<Number>(lnum->value + rnum->value);
+                if (op == '*') return make_shared<Number>(lnum->value * rnum->value);
+            }
+        }
+        return make_shared<BinaryOp>(op, left, right);
+    }
 };
 
-// ==================== Парсер ====================
+// ==================== CAM Machine ====================
+enum class CAMCommand {
+    PUSH,
+    GRAB,
+    ACCESS,
+    APPLY,
+    ADD,
+    MUL,
+    RETURN
+};
+
+class CAMMachine {
+    stack<int> eval_stack;
+    vector<vector<int>> env_stack;
+    
+    void execute(CAMCommand cmd, int arg = 0) {
+        switch (cmd) {
+            case CAMCommand::PUSH: {
+                eval_stack.push(arg);
+                break;
+            }
+            case CAMCommand::GRAB: {
+                if (eval_stack.empty()) throw runtime_error("Stack underflow");
+                int arg_val = eval_stack.top();
+                eval_stack.pop();
+                env_stack.push_back({arg_val});
+                break;
+                
+            } 
+            case CAMCommand::ACCESS: {
+                if (env_stack.empty()) throw runtime_error("No environment");
+                int deBruijnIdx = arg;
+                
+                // Ищем переменную в окружениях (от внутреннего к внешнему)
+                for (int i = env_stack.size() - 1; i >= 0; --i) {
+                    if (deBruijnIdx < env_stack[i].size()) {
+                        eval_stack.push(env_stack[i][deBruijnIdx]);
+                        return;
+                    }
+                    deBruijnIdx -= env_stack[i].size();
+                }
+                throw runtime_error("Variable access out of bounds");
+            }
+                
+            case CAMCommand::APPLY: {
+                // if (eval_stack.size() < 2) throw runtime_error("Stack underflow");
+                // int arg_val = eval_stack.top(); eval_stack.pop();
+                // int func_val = eval_stack.top(); eval_stack.pop();
+                
+                // // Push argument to current environment
+                // if (!env_stack.empty()) {
+                //     env_stack.back().push_back(arg_val);
+                // }
+                // eval_stack.push(func_val);
+                break;
+            }
+                
+            case CAMCommand::ADD: {
+                if (eval_stack.size() < 2) throw runtime_error("Stack underflow");
+                int b = eval_stack.top(); eval_stack.pop();
+                int a = eval_stack.top(); eval_stack.pop();
+                eval_stack.push(a + b);
+                break;
+            }
+                
+            case CAMCommand::MUL: {
+                if (eval_stack.size() < 2) throw runtime_error("Stack underflow");
+                int b = eval_stack.top(); eval_stack.pop();
+                int a = eval_stack.top(); eval_stack.pop();
+                eval_stack.push(a * b);
+                break;
+            }
+                
+            case CAMCommand::RETURN: {
+                if (eval_stack.empty()) throw runtime_error("Stack underflow");
+                int result = eval_stack.top();
+                eval_stack.pop();
+                if (!env_stack.empty()) {
+                    env_stack.pop_back();
+                }
+                eval_stack.push(result);
+                break;
+            }
+        }
+    }
+
+public:
+    int execute(const vector<pair<CAMCommand, int>>& program) {
+        eval_stack = stack<int>();
+        env_stack.clear();
+        env_stack.push_back({}); // Global environment
+        
+        for (const auto& [cmd, arg] : program) {
+            execute(cmd, arg);
+        }
+        
+        if (eval_stack.size() != 1) {
+            throw runtime_error("Invalid final stack state");
+        }
+        return eval_stack.top();
+    }
+};
+
+class CAMCompiler {
+    vector<pair<CAMCommand, int>> compileTerm(TermPtr term, int env_size = 0) {
+        vector<pair<CAMCommand, int>> code;
+        
+        if (auto var = dynamic_pointer_cast<Variable>(term)) {
+            if (var->deBruijnIdx < 0) throw runtime_error("Unbound variable");
+            code.emplace_back(CAMCommand::ACCESS, var->deBruijnIdx);
+        }
+        else if (auto num = dynamic_pointer_cast<Number>(term)) {
+            code.emplace_back(CAMCommand::PUSH, num->value);
+        }
+        else if (auto lam = dynamic_pointer_cast<Lambda>(term)) {
+            code.emplace_back(CAMCommand::GRAB, 0);
+            auto body_code = compileTerm(lam->body, env_size + 1);
+            code.insert(code.end(), body_code.begin(), body_code.end());
+            code.emplace_back(CAMCommand::RETURN, 0);
+        }
+        else if (auto app = dynamic_pointer_cast<Application>(term)) {
+            auto arg_code = compileTerm(app->arg, env_size);
+            auto func_code = compileTerm(app->func, env_size);
+            
+            code.insert(code.end(), arg_code.begin(), arg_code.end());
+            code.insert(code.end(), func_code.begin(), func_code.end());
+            code.emplace_back(CAMCommand::APPLY, 0);
+        }
+        else if (auto binop = dynamic_pointer_cast<BinaryOp>(term)) {
+            auto left_code = compileTerm(binop->left, env_size);
+            auto right_code = compileTerm(binop->right, env_size);
+            
+            code.insert(code.end(), left_code.begin(), left_code.end());
+            code.insert(code.end(), right_code.begin(), right_code.end());
+            code.emplace_back(binop->op == '+' ? CAMCommand::ADD : CAMCommand::MUL, 0);
+        }
+        
+        return code;
+    }
+
+public:
+    vector<pair<CAMCommand, int>> compile(TermPtr term) {
+        auto dbTerm = term->toDeBruijn();
+        return compileTerm(dbTerm);
+    }
+};
+
+// ==================== Parser ====================
 class Parser {
     string input;
     size_t pos = 0;
@@ -130,22 +335,6 @@ class Parser {
         return input[pos++];
     }
     
-    bool match(const string& s) {
-        size_t old_pos = pos;
-        try {
-            for (char c : s) {
-                if (next() != c) {
-                    pos = old_pos;
-                    return false;
-                }
-            }
-            return true;
-        } catch (...) {
-            pos = old_pos;
-            return false;
-        }
-    }
-    
     TermPtr parseTerm() {
         if (peek() != '(') {
             if (isdigit(peek())) {
@@ -157,11 +346,11 @@ class Parser {
         }
         
         next(); // consume '('
-        if (match("lambda")) {
+        if (peek() == 'l' && input.substr(pos, 6) == "lambda") {
+            pos += 6;
             return parseLambda();
         }
         
-        // Application or BinaryOp
         auto left = parseTerm();
         char c = peek();
         
@@ -181,10 +370,7 @@ class Parser {
         string param;
         while (isalpha(peek())) param += next();
         
-        if (param.empty()) {
-            throw runtime_error("Expected parameter name after lambda");
-        }
-        
+        if (param.empty()) throw runtime_error("Expected parameter name after lambda");
         if (next() != '.') throw runtime_error("Expected '.' after lambda parameter");
         
         auto body = parseTerm();
@@ -214,176 +400,19 @@ public:
     }
 };
 
-// ==================== Компиляция в КАМ ====================
-enum class CAMCommand {
-    ACCESS,
-    GRAB,
-    PUSH,
-    RETURN,
-    ADD,
-    MUL,
-    CONST
-};
-
-// ==================== Исполнение КАМ ====================
-class CAMMachine {
-    stack<int> eval_stack;
-    vector<vector<int>> env_stack;
-    
-    void executeCommand(CAMCommand cmd, int arg = 0) {
-        switch (cmd) {
-            case CAMCommand::ACCESS: {
-                if (env_stack.empty()) throw runtime_error("No environment for access");
-                
-                // Ищем переменную в окружениях от внутреннего к внешнему
-                int current_env = env_stack.size() - 1;
-                while (current_env >= 0) {
-                    if (arg < env_stack[current_env].size()) {
-                        eval_stack.push(env_stack[current_env][arg]);
-                        return;
-                    }
-                    arg -= env_stack[current_env].size();
-                    current_env--;
-                }
-                throw runtime_error("Invalid variable access: " + to_string(arg));
-            }
-            case CAMCommand::GRAB: {
-                // Создаем новое окружение для параметра
-                env_stack.push_back({});
-                break;
-            }
-            case CAMCommand::PUSH: {
-                if (eval_stack.empty()) throw runtime_error("Stack underflow");
-                int val = eval_stack.top();
-                eval_stack.pop();
-                
-                if (env_stack.empty()) throw runtime_error("No environment to push to");
-                // Добавляем значение в текущее окружение
-                env_stack.back().push_back(val);
-                break;
-            }
-            case CAMCommand::RETURN: {
-                if (eval_stack.empty()) throw runtime_error("Stack underflow");
-                int result = eval_stack.top();
-                eval_stack.pop();
-                
-                if (env_stack.empty()) throw runtime_error("Env stack underflow");
-                env_stack.pop_back(); // Удаляем окружение параметра
-                
-                eval_stack.push(result);
-                break;
-            }
-            case CAMCommand::ADD: {
-                if (eval_stack.size() < 2) throw runtime_error("Stack underflow");
-                int b = eval_stack.top(); eval_stack.pop();
-                int a = eval_stack.top(); eval_stack.pop();
-                eval_stack.push(a + b);
-                break;
-            }
-            case CAMCommand::MUL: {
-                if (eval_stack.size() < 2) throw runtime_error("Stack underflow");
-                int b = eval_stack.top(); eval_stack.pop();
-                int a = eval_stack.top(); eval_stack.pop();
-                eval_stack.push(a * b);
-                break;
-            }
-            case CAMCommand::CONST: {
-                eval_stack.push(arg);
-                break;
-            }
-        }
-    }
-
-public:
-    int execute(const vector<CAMCommand>& code) {
-        eval_stack = stack<int>();
-        env_stack.clear();
-        env_stack.push_back({}); // Глобальное окружение
-
-        for (size_t i = 0; i < code.size(); ) {
-            CAMCommand cmd = code[i];
-            if (cmd == CAMCommand::ACCESS || cmd == CAMCommand::CONST) {
-                executeCommand(cmd, static_cast<int>(code[i+1]));
-                i += 2;
-            } else {
-                executeCommand(cmd);
-                i++;
-            }
-        }
-        
-        if (eval_stack.size() != 1) {
-            throw runtime_error("Invalid result state, stack size: " + to_string(eval_stack.size()));
-        }
-        return eval_stack.top();
-    }
-};
-
-class CAMCompiler {
-    vector<CAMCommand> compileTerm(TermPtr term, int env_size = 0) {
-        vector<CAMCommand> code;
-        
-        if (auto var = dynamic_pointer_cast<Variable>(term)) {
-            if (var->deBruijnIdx < 0) throw runtime_error("Unbound variable: " + var->name);
-            code.push_back(CAMCommand::ACCESS);
-            // Индекс переменной в текущем окружении
-            code.push_back(static_cast<CAMCommand>(env_size - var->deBruijnIdx  - 1));
-        }
-        else if (auto num = dynamic_pointer_cast<Number>(term)) {
-            code.push_back(CAMCommand::CONST);
-            code.push_back(static_cast<CAMCommand>(num->value));
-        }
-        else if (auto lam = dynamic_pointer_cast<Lambda>(term)) {
-            // Компилируем тело с увеличенным размером окружения
-            auto bodyCode = compileTerm(lam->body, env_size + 1);
-            
-            // Оборачиваем тело в GRAB и RETURN
-             // Оборачиваем тело в GRAB и RETURN
-            code.push_back(CAMCommand::GRAB);
-            code.push_back(CAMCommand::PUSH);
-            code.insert(code.end(), bodyCode.begin(), bodyCode.end());
-            code.push_back(CAMCommand::RETURN);
-        }
-        else if (auto app = dynamic_pointer_cast<Application>(term)) {
-             // Сначала аргумент, затем функцию
-            auto argCode = compileTerm(app->arg, env_size);
-            auto funcCode = compileTerm(app->func, env_size);
-            
-            code.insert(code.end(), argCode.begin(), argCode.end());
-            code.insert(code.end(), funcCode.begin(), funcCode.end());
-            // code.push_back(CAMCommand::PUSH);
-        }
-        else if (auto binop = dynamic_pointer_cast<BinaryOp>(term)) {
-            auto leftCode = compileTerm(binop->left, env_size);
-            auto rightCode = compileTerm(binop->right, env_size);
-            code.insert(code.end(), leftCode.begin(), leftCode.end());
-            code.insert(code.end(), rightCode.begin(), rightCode.end());
-            code.push_back(binop->op == '+' ? CAMCommand::ADD : CAMCommand::MUL);
-        }
-        
-        return code;
-    }
-
-public:
-    vector<CAMCommand> compile(TermPtr term) {
-        auto dbTerm = term->toDeBruijn(0, {});
-        return compileTerm(dbTerm);
-    }
-};
-
-// ==================== Тестирование ====================
-
+// ==================== Main ====================
 int main() {
     Parser parser;
     CAMCompiler compiler;
     CAMMachine machine;
     
     vector<string> tests = {
-        "42", // Просто число
-        "(1 + 2)", // Бинарная операция
-        "((lambda x. x) 42)", // Идентичная функция
-        "((lambda x. (x + 1)) 42)", // Прибавление 1
-        "((lambda x. (x * 2)) 11)", // Умножение на 2
-        "((lambda x. ((lambda y. (x + y)) 10)) 32)" // Вложенные лямбды
+        "42",
+        "(1 + 2)",
+        "((lambda x. x) 42)",
+        "((lambda x. (x + 1)) 42)",
+        "((lambda x. (x * 2)) 11)",
+        "((lambda x. ((lambda y. (x + y)) 10)) 32)"
     };
     
     for (const auto& test : tests) {
@@ -391,32 +420,30 @@ int main() {
         try {
             TermPtr term = parser.parse(test);
             cout << "Parsed: " << term->toString() << endl;
-            auto dbTerm = term->toDeBruijn(0, {});
-            cout << "DeBruijn: " << dbTerm->toString() << endl;
-            auto code = compiler.compile(term);
             
-            cout << "CAM code: ";
-            for (size_t i = 0; i < code.size(); ) {
-                CAMCommand cmd = code[i];
+            auto dbTerm = term->toDeBruijn();
+            cout << "DeBruijn: " << dbTerm->toString() << endl;
+            
+            auto reduced = term->reduce();
+            cout << "Reduced: " << reduced->toString() << endl;
+            
+            auto program = compiler.compile(term);
+            
+            cout << "CAM program: ";
+            for (auto [cmd, arg] : program) {
                 switch (cmd) {
-                    case CAMCommand::ACCESS: 
-                        cout << "ACCESS(" << static_cast<int>(code[i+1]) << ") "; 
-                        i += 2;
-                        break;
-                    case CAMCommand::CONST: 
-                        cout << "CONST(" << static_cast<int>(code[i+1]) << ") "; 
-                        i += 2;
-                        break;
-                    case CAMCommand::GRAB: cout << "GRAB "; i++; break;
-                    case CAMCommand::PUSH: cout << "PUSH "; i++; break;
-                    case CAMCommand::RETURN: cout << "RETURN "; i++; break;
-                    case CAMCommand::ADD: cout << "ADD "; i++; break;
-                    case CAMCommand::MUL: cout << "MUL "; i++; break;
+                    case CAMCommand::PUSH: cout << "PUSH(" << arg << ") "; break;
+                    case CAMCommand::GRAB: cout << "GRAB "; break;
+                    case CAMCommand::ACCESS: cout << "ACCESS(" << arg << ") "; break;
+                    case CAMCommand::APPLY: cout << "APPLY "; break;
+                    case CAMCommand::ADD: cout << "ADD "; break;
+                    case CAMCommand::MUL: cout << "MUL "; break;
+                    case CAMCommand::RETURN: cout << "RETURN "; break;
                 }
             }
             cout << endl;
             
-            int result = machine.execute(code);
+            int result = machine.execute(program);
             cout << "Result: " << result << endl;
         } catch (const exception& e) {
             cerr << "Error: " << e.what() << endl;
@@ -426,6 +453,3 @@ int main() {
     
     return 0;
 }
-
-
-
