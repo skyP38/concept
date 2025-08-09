@@ -4,6 +4,7 @@
 #include <memory>
 #include <unordered_map>
 #include <stack>
+#include <variant>
 
 using namespace std;
 
@@ -99,7 +100,6 @@ struct Application : Term {
     
     TermPtr reduce() const override {
         if (auto lam = dynamic_pointer_cast<Lambda>(func)) {
-            // β-reduction with substitution
             return substitute(lam->body, lam->param, arg)->reduce();
         }
         if (!func->isValue()) {
@@ -175,52 +175,90 @@ enum class CAMCommand {
     APPLY,
     ADD,
     MUL,
-    RETURN
+    RETURN,
+    JUMP,
+    JUMP_IF,
+    LOOP,
+    HALT
+};
+
+struct CAMState {
+    vector<pair<CAMCommand, int>> code;
+    vector<int> env;
+    vector<int> dump;
 };
 
 class CAMMachine {
+    vector<pair<CAMCommand, int>> code_stack;
+    vector<int> env_stack;
+    vector<vector<int>> dump_stack;  
     stack<int> eval_stack;
-    vector<vector<int>> env_stack;
-    
-    void execute(CAMCommand cmd, int arg = 0) {
+
+    void executeCommand(const pair<CAMCommand, int>& instruction) {
+        auto [cmd, arg] = instruction;
+        
         switch (cmd) {
-            case CAMCommand::PUSH: {
+            case CAMCommand::PUSH:
                 eval_stack.push(arg);
                 break;
-            }
-            case CAMCommand::GRAB: {
+                
+           case CAMCommand::GRAB: {
                 if (eval_stack.empty()) throw runtime_error("Stack underflow");
                 int arg_val = eval_stack.top();
                 eval_stack.pop();
-                env_stack.push_back({arg_val});
+                
+                // текущее состояние
+                vector<int> dump_item;
+                dump_item.push_back(code_stack.size());  // Позиция в коде
+                dump_item.push_back(env_stack.size());  // Размер окружения
+                dump_item.insert(dump_item.end(), env_stack.begin(), env_stack.end());
+                dump_stack.push_back(dump_item);
+                
+                env_stack.insert(env_stack.begin(), arg_val);
                 break;
-                
-            } 
+            }
+
             case CAMCommand::ACCESS: {
-                if (env_stack.empty()) throw runtime_error("No environment");
-                int deBruijnIdx = arg;
-                
-                // Ищем переменную в окружениях (от внутреннего к внешнему)
-                for (int i = env_stack.size() - 1; i >= 0; --i) {
-                    if (deBruijnIdx < env_stack[i].size()) {
-                        eval_stack.push(env_stack[i][deBruijnIdx]);
-                        return;
-                    }
-                    deBruijnIdx -= env_stack[i].size();
+                if (arg < 0 || arg >= env_stack.size()) {
+                    throw runtime_error("Variable access out of bounds: index " + 
+                                     to_string(arg) + " in env of size " + 
+                                     to_string(env_stack.size()));
                 }
-                throw runtime_error("Variable access out of bounds");
+                eval_stack.push(env_stack[arg]);
+                break;
             }
                 
             case CAMCommand::APPLY: {
-                // if (eval_stack.size() < 2) throw runtime_error("Stack underflow");
-                // int arg_val = eval_stack.top(); eval_stack.pop();
-                // int func_val = eval_stack.top(); eval_stack.pop();
+                // передача управления следующей команде
+                break;
+            }
                 
-                // // Push argument to current environment
-                // if (!env_stack.empty()) {
-                //     env_stack.back().push_back(arg_val);
-                // }
-                // eval_stack.push(func_val);
+            case CAMCommand::RETURN: {
+                if (eval_stack.empty()) throw runtime_error("Stack underflow");
+                int result = eval_stack.top();
+                eval_stack.pop();
+                
+                if (dump_stack.empty()) {
+                    eval_stack.push(result);
+                    code_stack.clear();
+                    return;
+                }
+                
+                vector<int> dump_item = dump_stack.back();
+                dump_stack.pop_back();
+                
+                auto it = dump_item.begin();
+                int code_pos = *it++;
+                int env_size = *it++;
+                vector<int> saved_env(it, it + env_size);
+                
+                env_stack = saved_env;
+                
+                if (code_pos < code_stack.size()) {
+                    code_stack.erase(code_stack.begin(), code_stack.begin() + code_pos);
+                }
+                
+                eval_stack.push(result);
                 break;
             }
                 
@@ -240,27 +278,22 @@ class CAMMachine {
                 break;
             }
                 
-            case CAMCommand::RETURN: {
-                if (eval_stack.empty()) throw runtime_error("Stack underflow");
-                int result = eval_stack.top();
-                eval_stack.pop();
-                if (!env_stack.empty()) {
-                    env_stack.pop_back();
-                }
-                eval_stack.push(result);
-                break;
-            }
+            default:
+                throw runtime_error("Unknown command");
         }
     }
 
 public:
     int execute(const vector<pair<CAMCommand, int>>& program) {
-        eval_stack = stack<int>();
+        code_stack = program;
         env_stack.clear();
-        env_stack.push_back({}); // Global environment
+        dump_stack.clear();
+        eval_stack = stack<int>();
         
-        for (const auto& [cmd, arg] : program) {
-            execute(cmd, arg);
+        while (!code_stack.empty()) {
+            auto instruction = code_stack.front();
+            code_stack.erase(code_stack.begin());
+            executeCommand(instruction);
         }
         
         if (eval_stack.size() != 1) {
@@ -270,12 +303,16 @@ public:
     }
 };
 
+// =================== CAM Compiler ====================
 class CAMCompiler {
     vector<pair<CAMCommand, int>> compileTerm(TermPtr term, int env_size = 0) {
         vector<pair<CAMCommand, int>> code;
         
         if (auto var = dynamic_pointer_cast<Variable>(term)) {
-            if (var->deBruijnIdx < 0) throw runtime_error("Unbound variable");
+            // Проверяем, что индекс переменной в пределах окружения
+            if (var->deBruijnIdx >= env_size) {
+                throw runtime_error("Variable access out of bounds during compilation");
+            }
             code.emplace_back(CAMCommand::ACCESS, var->deBruijnIdx);
         }
         else if (auto num = dynamic_pointer_cast<Number>(term)) {
@@ -288,9 +325,9 @@ class CAMCompiler {
             code.emplace_back(CAMCommand::RETURN, 0);
         }
         else if (auto app = dynamic_pointer_cast<Application>(term)) {
+            // Сначала компилируем аргумент, затем функцию
             auto arg_code = compileTerm(app->arg, env_size);
             auto func_code = compileTerm(app->func, env_size);
-            
             code.insert(code.end(), arg_code.begin(), arg_code.end());
             code.insert(code.end(), func_code.begin(), func_code.end());
             code.emplace_back(CAMCommand::APPLY, 0);
@@ -298,7 +335,6 @@ class CAMCompiler {
         else if (auto binop = dynamic_pointer_cast<BinaryOp>(term)) {
             auto left_code = compileTerm(binop->left, env_size);
             auto right_code = compileTerm(binop->right, env_size);
-            
             code.insert(code.end(), left_code.begin(), left_code.end());
             code.insert(code.end(), right_code.begin(), right_code.end());
             code.emplace_back(binop->op == '+' ? CAMCommand::ADD : CAMCommand::MUL, 0);
@@ -307,7 +343,7 @@ class CAMCompiler {
         return code;
     }
 
-public:
+    public:
     vector<pair<CAMCommand, int>> compile(TermPtr term) {
         auto dbTerm = term->toDeBruijn();
         return compileTerm(dbTerm);
@@ -439,6 +475,10 @@ int main() {
                     case CAMCommand::ADD: cout << "ADD "; break;
                     case CAMCommand::MUL: cout << "MUL "; break;
                     case CAMCommand::RETURN: cout << "RETURN "; break;
+                    case CAMCommand::JUMP: cout << "JUMP(" << arg << ") "; break;
+                    case CAMCommand::JUMP_IF: cout << "JUMP_IF(" << arg << ") "; break;
+                    case CAMCommand::LOOP: cout << "LOOP(" << arg << ") "; break;
+                    case CAMCommand::HALT: cout << "HALT "; break;
                 }
             }
             cout << endl;
