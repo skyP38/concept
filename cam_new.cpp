@@ -66,7 +66,7 @@ class Parser {
     }
     
     std::shared_ptr<Expr> parse_atom() {
-        if (peek() == '\\' || peek() == 'λ') {
+        if (peek() == '\\') {
             consume();
             std::string param = parse_identifier();
             if (peek() != '.') throw std::runtime_error("Expected '.'");
@@ -100,7 +100,7 @@ class Parser {
     
     std::shared_ptr<Expr> parse_app() {
         auto left = parse_atom();
-        while (peek() != '\0' && peek() != ')' && peek() != '\\' && peek() != 'λ') {
+        while (peek() != '\0' && peek() != ')' && peek() != '\\') {
             auto right = parse_atom();
             left = std::make_shared<Expr>(App{left, right});
         }
