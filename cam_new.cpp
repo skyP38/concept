@@ -135,7 +135,7 @@ public:
             return std::make_shared<Expr>(Var{v.name, -1});
         }
         int idx = depth - it->second - 1;
-        if (idx < 0) idx = 0;  // Гарантируем неотрицательный индекс
+        // if (idx < 0) idx = 0;  // Гарантируем неотрицательный индекс
         return std::make_shared<Expr>(Var{v.name, idx});
     }
     
@@ -171,6 +171,8 @@ class CAMMachine {
     std::stack<int> stack;
     std::vector<int> env;
     std::map<std::string, int> var_map;
+
+    std::map<std::string, int> free_var_values;
     int result;
     int depth = 0;
     int current_depth = 0;
@@ -224,9 +226,10 @@ public:
             }
         } else {
             // Корректируем индекс для текущей глубины
-            int adjusted_idx = std::min(v.de_bruijn_idx, current_depth - 1);
+            // int adjusted_idx = std::min(v.de_bruijn_idx, current_depth - 1);
             code.push_back(CAMCommand::ACCESS);
-            code.push_back(static_cast<CAMCommand>(adjusted_idx));
+            code.push_back(static_cast<CAMCommand>(v.de_bruijn_idx));
+            // code.push_back(static_cast<CAMCommand>(adjusted_idx));
         }
     }
 
@@ -235,7 +238,8 @@ public:
         std::vector<int> closure_env = env;
         
         // Добавляем новую переменную в окружение
-        env.push_back(current_depth++);
+        // env.push_back(current_depth++);
+        env.push_back(0); // Placeholder for the parameter
         
         // Компилируем тело
         size_t body_start = code.size();
@@ -350,9 +354,9 @@ public:
                     break;
                 }
                 case CAMCommand::GRAB: {
-                    // if (stack.empty()) throw std::runtime_error("Stack underflow");
-                    // int arg = stack.top(); stack.pop();
-                    // env.push_back(arg);
+                    if (stack.empty()) throw std::runtime_error("Stack underflow");
+                    int arg = stack.top(); stack.pop();
+                    env.push_back(arg);
                     break;
                 }
                 case CAMCommand::RETURN: {
