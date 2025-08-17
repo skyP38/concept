@@ -43,7 +43,6 @@ struct overloaded : Ts... { using Ts::operator()...; };
 template<class... Ts>
 overloaded(Ts...) -> overloaded<Ts...>;
 
-// Парсер с автоматическим определением свободных переменных
 class Parser {
     std::string input;
     size_t pos = 0;
@@ -143,7 +142,6 @@ public:
             return std::make_shared<Expr>(Var{v.name, -1});
         }
         int idx = depth - it->second - 1;
-        // if (idx < 0) idx = 0;  // Гарантируем неотрицательный индекс
         return std::make_shared<Expr>(Var{v.name, idx});
     }
     
@@ -225,8 +223,6 @@ private:
                code[4] == CAMCommand::RETURN;
     }
 
-
-    
 public:
     void operator()(const Var& v) {
         if (v.de_bruijn_idx == -1) {
@@ -239,11 +235,8 @@ public:
                 throw std::runtime_error("Unbound variable: " + v.name);
             }
         } else {
-            // Корректируем индекс для текущей глубины
-            // int adjusted_idx = std::min(v.de_bruijn_idx, current_depth - 1);
             code.push_back(CAMCommand::ACCESS);
             code.push_back(static_cast<CAMCommand>(v.de_bruijn_idx));
-            // code.push_back(static_cast<CAMCommand>(adjusted_idx));
         }
     }
 
@@ -251,11 +244,8 @@ public:
         // Сохраняем окружение для замыкания
         std::vector<int> closure_env = env;
         
-        // Добавляем новую переменную в окружение
-        // env.push_back(current_depth++);
-        env.push_back(0); // Placeholder for the parameter
+        env.push_back(0); 
         
-        // Компилируем тело
         size_t body_start = code.size();
         code.push_back(CAMCommand::GRAB);
         compile(a.body);
@@ -265,7 +255,7 @@ public:
         try {
             repr = "λ" + a.param + "." + bodyToString(a.body);
         } catch (...) {
-            repr = "λ" + a.param + ".[...]"; // fallback
+            repr = "λ" + a.param + ".[...]"; 
         }
         
         // Создаем замыкание
@@ -293,7 +283,7 @@ public:
             code.push_back(CAMCommand::APPLY);
             code.push_back(CAMCommand::FORCE);
         } else {
-            compile(a.arg);  // Строго: сначала аргумент
+            compile(a.arg);  
             compile(a.fun);
             code.push_back(CAMCommand::APPLY);
         }
@@ -323,7 +313,7 @@ public:
         env.clear();
         stack = std::stack<int>();
         return_stack = std::stack<size_t>();
-        result = -1; // Инициализация результата
+        result = -1; 
         
         // Инициализация свободных переменных
         for (const auto& [name, val] : var_map) {
@@ -343,7 +333,6 @@ public:
                         stack.push(env[env.size() - idx - 1]);
                     }
                     else {
-                        // Безопасный доступ с корректировкой индекса
                         int safe_idx = std::min(idx, static_cast<int>(env.size()) - 1);
                         stack.push(env[env.size() - safe_idx - 1]);
                     }
@@ -366,7 +355,7 @@ public:
                     const auto& cl = closures[closure_idx];
                     return_stack.push(pc);
                     env = cl.captured_env;
-                    env.push_back(arg_thunk_idx);  // Сохраняем thunk в окружении
+                    env.push_back(arg_thunk_idx);  
                     pc = cl.body_pos;
                     break;
                 }
@@ -394,7 +383,7 @@ public:
                         0               // Пустое значение
                     });
                     pc = code.size();   // Пропускаем тело thunk'а (оно будет вычислено при FORCE)
-                    stack.push(thunks.size() - 1);  // Кладем индекс thunk'а на стек
+                    stack.push(thunks.size() - 1);  
                     break;
                 }
                 case CAMCommand::FORCE: {
@@ -441,7 +430,7 @@ public:
             // Проверяем, является ли результат свободной переменной
             for (const auto& [name, val] : var_map) {
                 if (val == result) {
-                    return name;  // Например, 'a' или 'b'
+                    return name;  
                 }
             }
             // Если это символ (ASCII)
