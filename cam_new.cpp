@@ -30,6 +30,14 @@ struct App {
     std::shared_ptr<Expr> arg;
 };
 
+struct Thunk {
+    std::vector<int> saved_env;
+    size_t body_pos;
+    bool evaluated = false;
+    int value;
+};
+std::vector<Thunk> thunks;  // Хранилище thunk'ов
+
 template<class... Ts>
 struct overloaded : Ts... { using Ts::operator()...; };
 template<class... Ts>
@@ -162,7 +170,9 @@ enum class CAMCommand {
     APPLY,
     GRAB,
     RETURN,
-    PUSH_CLOSURE
+    PUSH_CLOSURE,
+    DELAY,
+    FORCE
 };
 
 // Универсальная КАМ машина
@@ -176,6 +186,10 @@ class CAMMachine {
     int result;
     int depth = 0;
     int current_depth = 0;
+
+    bool is_lazy = false;  // По умолчанию — строгие вычисления
+public:
+    void set_lazy(bool lazy) { is_lazy = lazy; }
     
     struct Closure {
         std::vector<int> captured_env;
@@ -272,9 +286,17 @@ public:
     }
     
     void operator()(const App& a) {
-        compile(a.arg);
-        compile(a.fun);
-        code.push_back(CAMCommand::APPLY);
+        if (is_lazy) {
+            code.push_back(CAMCommand::DELAY);
+            compile(a.arg);
+            compile(a.fun);
+            code.push_back(CAMCommand::APPLY);
+            code.push_back(CAMCommand::FORCE);
+        } else {
+            compile(a.arg);  // Строго: сначала аргумент
+            compile(a.fun);
+            code.push_back(CAMCommand::APPLY);
+        }
     }
     
     void load(const std::string& program) {
@@ -338,18 +360,13 @@ public:
                 }
                 case CAMCommand::APPLY: {
                     if (stack.size() < 2) throw std::runtime_error("Stack underflow");
-                    
-                    int arg = stack.top(); stack.pop();
+                    int arg_thunk_idx = stack.top(); stack.pop();
                     int closure_idx = stack.top(); stack.pop();
-                    
-                    if (closure_idx < 0 || closure_idx >= closures.size()) {
-                        throw std::runtime_error("Invalid closure index");
-                    }
-                    
+                    // Применяем функцию к thunk'у (вычисление произойдет при FORCE)
                     const auto& cl = closures[closure_idx];
                     return_stack.push(pc);
                     env = cl.captured_env;
-                    env.push_back(arg);  // Добавляем аргумент в окружение
+                    env.push_back(arg_thunk_idx);  // Сохраняем thunk в окружении
                     pc = cl.body_pos;
                     break;
                 }
@@ -365,6 +382,37 @@ public:
                         pc = return_stack.top();
                         return_stack.pop();
                         if (!env.empty()) env.pop_back();
+                    }
+                    break;
+                }
+                case CAMCommand::DELAY: {
+                    // Сохраняем текущее окружение и позицию тела thunk'а
+                    thunks.push_back({
+                        env,            // Текущее окружение
+                        pc,             // Позиция начала тела thunk'а
+                        false,          // Флаг "не вычислено"
+                        0               // Пустое значение
+                    });
+                    pc = code.size();   // Пропускаем тело thunk'а (оно будет вычислено при FORCE)
+                    stack.push(thunks.size() - 1);  // Кладем индекс thunk'а на стек
+                    break;
+                }
+                case CAMCommand::FORCE: {
+                    if (stack.empty()) throw std::runtime_error("Stack underflow");
+                    int thunk_idx = stack.top(); stack.pop();
+                    if (thunk_idx < 0 || thunk_idx >= thunks.size()) {
+                        throw std::runtime_error("Invalid thunk index");
+                    }
+                    auto& thunk = thunks[thunk_idx];
+                    if (!thunk.evaluated) {
+                        // Вычисляем thunk
+                        return_stack.push(pc);
+                        env = thunk.saved_env;
+                        pc = thunk.body_pos;
+                        thunk.evaluated = true;
+                    } else {
+                        // Уже вычислен — берем значение
+                        stack.push(thunk.value);
                     }
                     break;
                 }
@@ -481,7 +529,9 @@ int main() {
         {"(\\x.\\y.y) a b", "False combinator"},
         {"(\\f.\\x.f (f x)) (\\z.z) a", "Church numeral 2"},
         {"(\\x.x x) (\\y.y)", "Self-application"},
-        {"(\\x.\\y.x y) (\\z.z) a", "Function application"}
+        {"(\\x.\\y.x y) (\\z.z) a", "Function application"},
+        {"(\\x.\\y.x) (\\z.z) (\\w.w w) (\\v.v v)", "Lazy evaluation (ignored w)"},
+        {"(\\x.x x) (\\y.y)", "Self-application with thunks"}
     };
 
     for (const auto& [input, desc] : tests) {
